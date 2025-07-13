@@ -1,0 +1,280 @@
+version: "3"
+
+vars:
+  BASE_DIR: /data/setulab
+  SCRIPT_DIR: "{{.PWD}}"
+
+tasks:
+  # Prerequisite tasks
+  prereq:
+    desc: Check and install prerequisites (Docker, Docker Compose, Task)
+    cmds:
+      - ./prerequisite.sh
+
+  prereq:check:
+    desc: Check prerequisites without installing
+    cmds:
+      - ./prerequisite.sh --check-only
+
+  prereq:force:
+    desc: Force reinstall prerequisites
+    cmds:
+      - ./prerequisite.sh --force
+
+  # Setup tasks
+  setup:infra:
+    desc: Setup infrastructure services
+    deps: [prereq:check]
+    cmds:
+      - ./setulab.sh setup infra {{.CLI_ARGS}}
+
+  setup:monitoring:
+    desc: Setup monitoring services
+    deps: [prereq:check]
+    cmds:
+      - ./setulab.sh setup monitoring {{.CLI_ARGS}}
+
+  setup:all:
+    desc: Setup all infrastructure and monitoring services
+    deps: [prereq:check]
+    cmds:
+      - ./setulab.sh setup infra postgres rabbitmq redis mongodb
+      - ./setulab.sh setup monitoring grafana prometheus dozzle loki
+
+  # Start tasks
+  start:infra:
+    desc: Start infrastructure services
+    cmds:
+      - ./setulab.sh start infra {{.CLI_ARGS}}
+
+  start:monitoring:
+    desc: Start monitoring services
+    cmds:
+      - ./setulab.sh start monitoring {{.CLI_ARGS}}
+
+  start:all:
+    desc: Start all services
+    cmds:
+      - task: start:infra
+        vars: { CLI_ARGS: "postgres rabbitmq redis mongodb" }
+      - task: start:monitoring
+        vars: { CLI_ARGS: "grafana prometheus dozzle loki" }
+
+  # Stop tasks
+  stop:infra:
+    desc: Stop infrastructure services
+    cmds:
+      - ./setulab.sh stop infra {{.CLI_ARGS}}
+
+  stop:monitoring:
+    desc: Stop monitoring services
+    cmds:
+      - ./setulab.sh stop monitoring {{.CLI_ARGS}}
+
+  stop:all:
+    desc: Stop all services
+    cmds:
+      - task: stop:infra
+        vars: { CLI_ARGS: "postgres rabbitmq redis mongodb" }
+      - task: stop:monitoring
+        vars: { CLI_ARGS: "grafana prometheus dozzle loki" }
+
+  # Status tasks
+  status:infra:
+    desc: Show infrastructure services status
+    cmds:
+      - ./setulab.sh status infra {{.CLI_ARGS}}
+
+  status:monitoring:
+    desc: Show monitoring services status
+    cmds:
+      - ./setulab.sh status monitoring {{.CLI_ARGS}}
+
+  status:all:
+    desc: Show all services status
+    cmds:
+      - ./setulab.sh status infra
+      - ./setulab.sh status monitoring
+
+  # List tasks
+  list:infra:
+    desc: List available infrastructure resources
+    cmds:
+      - ./setulab.sh list infra
+
+  list:monitoring:
+    desc: List available monitoring resources
+    cmds:
+      - ./setulab.sh list monitoring
+
+  # Utility tasks
+  check:deps:
+    desc: Check system dependencies
+    cmds:
+      - ./prerequisite.sh --check-only
+
+  clean:volumes:
+    desc: Clean unused Docker volumes
+    prompt: This will remove unused Docker volumes. Continue?
+    cmds:
+      - docker volume prune -f
+
+  clean:networks:
+    desc: Clean unused Docker networks
+    prompt: This will remove unused Docker networks. Continue?
+    cmds:
+      - docker network prune -f
+
+  clean:all:
+    desc: Clean all unused Docker resources
+    prompt: This will remove all unused Docker resources. Continue?
+    cmds:
+      - docker system prune -a -f --volumes
+
+  # Network management
+  network:create:
+    desc: Create the oneclick4j network
+    cmds:
+      - docker network create oneclick4j
+    status:
+      - docker network ls | grep oneclick4j
+
+  network:remove:
+    desc: Remove the oneclick4j network
+    cmds:
+      - docker network rm oneclick4j
+
+  # Development helpers
+  logs:
+    desc: Show logs for a service
+    cmds:
+      - |
+        if [ -z "{{.SERVICE}}" ]; then
+          echo "Usage: task logs SERVICE=<service_name>"
+          exit 1
+        fi
+        docker logs -f {{.SERVICE}}
+
+  exec:
+    desc: Execute command in a running container
+    cmds:
+      - |
+        if [ -z "{{.SERVICE}}" ]; then
+          echo "Usage: task exec SERVICE=<service_name> CMD='<command>'"
+          exit 1
+        fi
+        docker exec -it {{.SERVICE}} {{.CMD | default "bash"}}
+
+  # Quick start combinations
+  postgres:start:
+    desc: Quick start PostgreSQL with PgAdmin
+    cmds:
+      - ./setulab.sh setup infra postgres pg-admin
+      - ./setulab.sh start infra postgres pg-admin
+
+  monitoring:start:
+    desc: Quick start monitoring stack
+    cmds:
+      - ./setulab.sh setup monitoring grafana prometheus dozzle
+      - ./setulab.sh start monitoring grafana prometheus dozzle
+
+  full:stack:
+    desc: Setup and start full development stack
+    cmds:
+      - task: setup:all
+      - task: start:all
+
+  # Health checks
+  health:check:
+    desc: Check health of all running services
+    cmds:
+      - |
+        echo "=== Docker Service Health Check ==="
+        docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+
+  # Backup tasks
+  backup:volumes:
+    desc: Backup Docker volumes
+    cmds:
+      - |
+        BACKUP_DIR="{{.BASE_DIR}}/backups/$(date +%Y%m%d_%H%M%S)"
+        mkdir -p "$BACKUP_DIR"
+        echo "Creating backup in $BACKUP_DIR"
+
+        for volume in $(docker volume ls -q | grep -E "(postgres|mongodb|redis|grafana)"); do
+          echo "Backing up volume: $volume"
+          docker run --rm -v "$volume":/source -v "$BACKUP_DIR":/backup alpine \
+            tar czf "/backup/${volume}.tar.gz" -C /source .
+        done
+
+        echo "Backup completed in $BACKUP_DIR"
+
+  # Security tasks
+  security:scan:
+    desc: Scan Docker images for vulnerabilities
+    cmds:
+      - |
+        echo "=== Security Scan ==="
+        for image in postgres rabbitmq redis mongo grafana/grafana prom/prometheus; do
+          echo "Scanning $image..."
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy image "$image" || true
+        done
+
+  # Update tasks
+  update:images:
+    desc: Pull latest Docker images
+    cmds:
+      - |
+        echo "=== Updating Docker Images ==="
+        docker images --format "{{.Repository}}:{{.Tag}}" | grep -v "<none>" | \
+        while read image; do
+          echo "Pulling $image..."
+          docker pull "$image" || true
+        done
+
+  # Documentation
+  docs:urls:
+    desc: Show service URLs
+    cmds:
+      - |
+        echo "=== Service URLs ==="
+        echo "Grafana:      http://localhost:3000 (admin/admin)"
+        echo "Prometheus:   http://localhost:9090"
+        echo "Dozzle:       http://localhost:8080"
+        echo "PgAdmin:      http://localhost:15432 (admin@pgadmin.com/password)"
+        echo "RabbitMQ:     http://localhost:15672 (admin/admin)"
+        echo "Redis Insight: http://localhost:5540"
+        echo "Loki:         http://localhost:3100"
+        echo "Tempo:        http://localhost:3200"
+        echo "Jaeger:       http://localhost:16686"
+
+  help:
+    desc: Show help information
+    cmds:
+      - |
+        echo "🚀 Setulab Automation - Task Runner"
+        echo ""
+        echo "Prerequisites:"
+        echo "  task prereq           - Check and install prerequisites"
+        echo "  task prereq:check     - Check prerequisites only"
+        echo "  task prereq:force     - Force reinstall prerequisites"
+        echo ""
+        echo "Quick Start Commands:"
+        echo "  task setup:all        - Setup all services"
+        echo "  task start:all        - Start all services"
+        echo "  task postgres:start   - Quick PostgreSQL setup"
+        echo "  task monitoring:start - Quick monitoring setup"
+        echo "  task full:stack       - Complete development stack"
+        echo ""
+        echo "Individual Services:"
+        echo "  task setup:infra -- postgres rabbitmq"
+        echo "  task start:monitoring -- grafana prometheus"
+        echo ""
+        echo "Utilities:"
+        echo "  task docs:urls        - Show service URLs"
+        echo "  task health:check     - Check service health"
+        echo "  task logs SERVICE=postgres"
+        echo "  task exec SERVICE=postgres CMD='psql -U postgres'"
+        echo ""
+        echo "For full task list: task --list"
